@@ -295,9 +295,9 @@ final class WallpaperPlayer {
             caption.setAlpha(1f);
             return;
         }
-        caption.animate().alpha(0f).setDuration(250).withEndAction(() -> {
+        caption.animate().alpha(0f).setDuration(600).withEndAction(() -> {
             caption.setText(name);
-            caption.animate().alpha(1f).setDuration(350).start();
+            caption.animate().alpha(1f).setDuration(1000).start();
         }).start();
     }
 
@@ -330,8 +330,10 @@ final class WallpaperPlayer {
         incoming.setImageBitmap(bitmap);
         incoming.bringToFront();
         incoming.setAlpha(0f);
-        incoming.animate().alpha(1f).setDuration(400).start();
-        outgoing.animate().alpha(0f).setDuration(400).withEndAction(() -> {
+        incoming.animate().alpha(1f).setDuration(2000)
+                .setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator()).start();
+        outgoing.animate().alpha(0f).setDuration(2000)
+                .setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator()).withEndAction(() -> {
             outgoing.setImageDrawable(null);
             if (old != null && old != bitmap && !old.isRecycled()) {
                 old.recycle();
@@ -372,3 +374,4 @@ final class WallpaperPlayer {
         }
     }
 }
+

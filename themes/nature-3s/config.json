@@ -10,7 +10,7 @@
   "rows_below_dock": 1,
   "background_color": "#05070C",
   "wallpaper": true,
-  "wallpaper_rotation_seconds": 3,
+  "wallpaper_rotation_seconds": 10,
   "wallpaper_rotation_minutes": 0,
   "wallpaper_order": "shuffle",
   "wallpaper_captions": true,
