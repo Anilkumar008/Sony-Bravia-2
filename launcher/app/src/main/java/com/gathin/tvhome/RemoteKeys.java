@@ -467,7 +467,15 @@ final class RemoteKeys {
         if (open == null) open = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
         if (open == null) return;
         try {
-            ctx.startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            boolean fresh = LastOpened.isClosed(ctx, pkg);
+            if (fresh) {
+                open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                LastOpened.unmarkClosed(ctx, pkg);
+            } else {
+                open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            }
+            ctx.startActivity(open);
+            LastOpened.record(ctx, pkg);
         } catch (ActivityNotFoundException ignored) {
         }
     }

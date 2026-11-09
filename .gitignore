@@ -15,9 +15,20 @@ traces/
 # Results from tools/bench.py: result.json carries the address the run was given and the TV's fingerprint.
 bench-results/
 .DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+*.iml
+.vscode/
+captures/
+.cxx/
+android-keys/
+*.keystore
+*.jks
 
 # Generated install bundles and JVM crash reports stay out of contributions.
 *.apk
 *.aab
+*.log
 launcher/hs_err_pid*.log
 launcher/replay_pid*.log

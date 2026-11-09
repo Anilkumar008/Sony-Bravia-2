@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bluetooth connected: vibrant green when unfocused; dark green when focused on the white pill. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="#FF1B5E20" />
+    <item android:color="#FF34C759" />
+</selector>

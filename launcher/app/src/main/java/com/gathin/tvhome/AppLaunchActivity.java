@@ -16,9 +16,24 @@ public class AppLaunchActivity extends Activity {
             Uri data = getIntent().getData();
             String pkg = data == null ? null : data.getQueryParameter("id");
             if (pkg != null) {
-                Intent launch = getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
-                if (launch == null) launch = getPackageManager().getLaunchIntentForPackage(pkg);
-                if (launch != null) startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                boolean fresh = LastOpened.isClosed(this, pkg);
+                Intent launch = null;
+                if ("com.google.android.youtube.tv".equals(pkg) && fresh) {
+                    launch = new Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube://")).setPackage(pkg);
+                } else {
+                    launch = getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
+                    if (launch == null) launch = getPackageManager().getLaunchIntentForPackage(pkg);
+                }
+                if (launch != null) {
+                    if (fresh) {
+                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                        LastOpened.unmarkClosed(this, pkg);
+                    } else {
+                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    }
+                    startActivity(launch);
+                    LastOpened.record(this, pkg);
+                }
             }
         } catch (ActivityNotFoundException | SecurityException ignored) {
         } finally {

@@ -533,12 +533,24 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             return;
         }
-        Intent i = new Intent(Intent.ACTION_MAIN)
-                .setComponent(e.component)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-        // TV apps launch with the same leanback intent as from the stock launcher or the remote, so an app
-        // already running resumes instead of restarting; only phone apps added from the library use plain MAIN.
-        if (leanbackPackages.contains(e.pkg)) i.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+
+        boolean fresh = LastOpened.isClosed(ctx, e.pkg);
+        Intent i;
+        if ("com.google.android.youtube.tv".equals(e.pkg) && fresh) {
+            i = new Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube://"))
+                    .setPackage(e.pkg)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        } else {
+            i = new Intent(Intent.ACTION_MAIN).setComponent(e.component);
+            if (leanbackPackages.contains(e.pkg)) i.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+            if (fresh) {
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            } else {
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+            }
+        }
+        LastOpened.unmarkClosed(ctx, e.pkg);
+
         String action = launchActions.get(e.pkg);
         String inputId = LaunchActions.inputId(action);
         if (inputId != null) {
@@ -548,12 +560,17 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         if (action != null) {
             // NEW_TASK only: with RESET_TASK_IF_NEEDED, Android just brings a running task of the app to the front
             // ("Activity not started"), so the screen never opens while the app is up, e.g. MagentaTV's boot-time task.
-            Intent byAction = LaunchActions.intent(e.pkg, action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Intent byAction = LaunchActions.intent(e.pkg, action);
+            if (fresh) {
+                byAction.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            } else {
+                byAction.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            }
             if (ctx.getPackageManager().resolveActivity(byAction, 0) != null) i = byAction;
         }
         try {
             ctx.startActivity(i);
-            if (cinematic) LastOpened.record(ctx, e.pkg);
+            LastOpened.record(ctx, e.pkg);
             if (advancedEffects && !reducedMotion && ctx instanceof Activity) {
                 ((Activity) ctx).overridePendingTransition(R.anim.app_open_enter, R.anim.app_open_exit);
             }

@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="660dp"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/glass_panel"
+    android:paddingStart="32dp"
+    android:paddingEnd="32dp"
+    android:paddingTop="26dp"
+    android:paddingBottom="24dp"
+    android:elevation="16dp">
+
+    <!-- Header -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <ImageView
+            android:layout_width="26dp"
+            android:layout_height="26dp"
+            android:src="@drawable/ic_cast"
+            android:tint="#FFFFFFFF"
+            android:contentDescription="@null" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="14dp"
+            android:text="Wireless Display &amp; Cast"
+            android:textColor="#FFFFFFFF"
+            android:textSize="22sp"
+            android:fontFamily="@string/font_medium" />
+
+        <View
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:background="@drawable/status_dot"
+            android:layout_marginEnd="6dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Ready"
+            android:textColor="#B3FFFFFF"
+            android:textSize="13sp"
+            android:fontFamily="@string/font_medium" />
+    </LinearLayout>
+
+    <!-- Info banner: Device name & Wi-Fi -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:orientation="horizontal"
+        android:background="@drawable/cast_info_bg"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/castDeviceInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Device: Bedroom   •   Wi-Fi: Airtel_Anonymous"
+            android:textColor="#FFFFFFFF"
+            android:textSize="14sp"
+            android:fontFamily="@string/font_medium" />
+    </LinearLayout>
+
+    <!-- Steps Container -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:orientation="vertical">
+
+        <!-- Laptop Section -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="From Laptop (Windows / Mac / Chrome / Edge):"
+            android:textColor="#FFFFFFFF"
+            android:textSize="15sp"
+            android:fontFamily="@string/font_medium" />
+
+        <TextView
+            android:id="@+id/castLaptopSteps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="1. Open Google Chrome or Microsoft Edge\n2. Click Menu (⋮) → Cast... (or right-click → Cast)\n3. Click Sources → Cast screen (to share full desktop)\n4. Select Bedroom to connect"
+            android:textColor="#CCFFFFFF"
+            android:textSize="13sp"
+            android:lineSpacingExtra="4dp"
+            android:fontFamily="@string/font_body" />
+
+        <!-- Apple Section -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="From Apple Mac / iPhone / iPad:"
+            android:textColor="#FFFFFFFF"
+            android:textSize="15sp"
+            android:fontFamily="@string/font_medium" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Open Control Center → Screen Mirroring → Select Bedroom"
+            android:textColor="#CCFFFFFF"
+            android:textSize="13sp"
+            android:fontFamily="@string/font_body" />
+    </LinearLayout>
+
+    <!-- Buttons -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="22dp"
+        android:orientation="horizontal"
+        android:gravity="end">
+
+        <TextView
+            android:id="@+id/btnCastAirPlay"
+            style="@style/TopButton"
+            android:text="AirPlay"
+            android:focusable="true"
+            android:nextFocusLeft="@+id/btnCastAirPlay"
+            android:nextFocusRight="@+id/btnCastSettings"
+            android:nextFocusUp="@+id/btnCastAirPlay"
+            android:nextFocusDown="@+id/btnCastAirPlay" />
+
+        <TextView
+            android:id="@+id/btnCastSettings"
+            style="@style/TopButton"
+            android:text="Cast Settings"
+            android:focusable="true"
+            android:nextFocusLeft="@+id/btnCastAirPlay"
+            android:nextFocusRight="@+id/btnCastClose"
+            android:nextFocusUp="@+id/btnCastSettings"
+            android:nextFocusDown="@+id/btnCastSettings" />
+
+        <TextView
+            android:id="@+id/btnCastClose"
+            style="@style/TopButton"
+            android:text="Close"
+            android:focusable="true"
+            android:nextFocusLeft="@+id/btnCastSettings"
+            android:nextFocusRight="@+id/btnCastClose"
+            android:nextFocusUp="@+id/btnCastClose"
+            android:nextFocusDown="@+id/btnCastClose" />
+    </LinearLayout>
+</LinearLayout>

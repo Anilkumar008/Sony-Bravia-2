@@ -496,7 +496,9 @@ Contributing through a coding agent? [AGENTS.md](AGENTS.md) gives it the same ru
 
 The people whose work is in this repo:
 
-<a href="https://github.com/Gathin23/cleanyourtv/graphs/contributors"><img src="https://contrib.rocks/image?repo=Gathin23/cleanyourtv&columns=16&max=400" alt="Contributors"></a>
+- **Anil Kumar** ([@Anilkumar008](https://github.com/Anilkumar008)) — Sony BRAVIA BF1 enhancements, Recent Apps management, Rocket memory booster, background app termination daemon.
+
+<a href="https://github.com/Anilkumar008/Sony-Bravia-2/graphs/contributors"><img src="https://contrib.rocks/image?repo=Anilkumar008/Sony-Bravia-2&columns=16&max=400" alt="Contributors"></a>
 
 <details>
 <summary><strong>Star history</strong></summary>

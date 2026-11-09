@@ -3,6 +3,7 @@ package com.gathin.tvhome;
 import android.animation.ArgbEvaluator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.Dialog;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
@@ -29,6 +30,17 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.annotation.SuppressLint;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothClass;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothProfile;
+import android.hardware.input.InputManager;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
@@ -54,6 +66,7 @@ import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.SoundEffectConstants;
@@ -79,10 +92,16 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -184,6 +203,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private TextView greeting;
     private View clockBlock;
     private View btnInputs;
+    private View btnBoost;
+    private TextView btnBluetooth;
+    private ColorStateList btConnectedTint;
+    private ColorStateList btDisconnectedTint;
+    private BroadcastReceiver bluetoothReceiver;
+    private AudioDeviceCallback btAudioCallback;
     /** config show_inputs_pill: false keeps the Inputs pill hidden even when the TV has inputs. */
     private boolean showInputsPill = true;
     private TextView btnWifi;
@@ -438,12 +463,46 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         public void run() {
             updateGreeting();
             updatePanel();
-            // The pill follows the network callbacks and each return to Home; only the festive light follows the
-            // signal level, so only it needs this minute's binder calls (about 7 ms on the UI thread).
-            if (festive) updateWifiLabel();
+            // The pill follows the network callbacks and each return to Home; refresh each minute.
+            updateWifiLabel();
             sky.update();
             wallpaperPlayer.update();
             handler.postDelayed(this, MINUTE_MS);
+        }
+    };
+
+    private long lastTrafficBytes = 0;
+    private long lastTrafficTime = 0;
+    private String currentSpeedText = "";
+
+    private final Runnable speedMeterTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!resumed) return;
+            long rx = android.net.TrafficStats.getTotalRxBytes();
+            long tx = android.net.TrafficStats.getTotalTxBytes();
+            if (rx != android.net.TrafficStats.UNSUPPORTED && tx != android.net.TrafficStats.UNSUPPORTED) {
+                long nowBytes = rx + tx;
+                long nowTime = System.currentTimeMillis();
+                if (lastTrafficTime > 0 && nowTime > lastTrafficTime) {
+                    long diffBytes = Math.max(0, nowBytes - lastTrafficBytes);
+                    long diffMs = nowTime - lastTrafficTime;
+                    long bytesPerSec = (diffBytes * 1000) / diffMs;
+                    String speedStr;
+                    if (bytesPerSec < 1024) {
+                        speedStr = bytesPerSec + " B/s";
+                    } else if (bytesPerSec < 1024 * 1024) {
+                        speedStr = (bytesPerSec / 1024) + " KB/s";
+                    } else {
+                        speedStr = String.format(java.util.Locale.US, "%.1f MB/s", bytesPerSec / (1024.0 * 1024.0));
+                    }
+                    currentSpeedText = speedStr;
+                    updateWifiLabel();
+                }
+                lastTrafficBytes = nowBytes;
+                lastTrafficTime = nowTime;
+            }
+            handler.postDelayed(this, 1000);
         }
     };
 
@@ -816,8 +875,26 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
         btnInputs = findViewById(R.id.btnInputs);
         View btnSettings = findViewById(R.id.btnSettings);
-        btnInputs.setOnClickListener(v -> showInputs());
+        btnBluetooth = findViewById(R.id.btnBluetooth);
+        btnInputs.setOnClickListener(v -> showRecentApps());
+        btnInputs.setOnLongClickListener(v -> {
+            showInputs();
+            return true;
+        });
         btnWifi.setOnClickListener(v -> openNetworkPill());
+        if (btnBluetooth != null) {
+            makeIconOnly(btnBluetooth);
+            btnBluetooth.setOnClickListener(v -> openBluetooth());
+            btnBluetooth.setOnLongClickListener(v -> {
+                Intent intent = new Intent("com.google.android.intent.action.CONNECT_INPUT");
+                if (intent.resolveActivity(getPackageManager()) != null) {
+                    open(intent);
+                } else {
+                    open(systemIntent(Settings.ACTION_BLUETOOTH_SETTINGS));
+                }
+                return true;
+            });
+        }
         btnVpn.setOnClickListener(v -> openVpnPill());
         btnWifi.setOnLongClickListener(v -> {
             open(systemIntent(Settings.ACTION_WIFI_SETTINGS));
@@ -825,14 +902,19 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         });
         launcherSettingsButton = cfg.launcherSettingsButton;
         if (launcherSettingsButton) {
-            ((TextView) btnSettings).setText(R.string.launcher_settings);
-            ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_home_settings_pill, 0, 0, 0);
+            ((TextView) btnSettings).setText(null);
+            ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_settings, 0, 0, 0);
         }
         btnSettings.setOnClickListener(v -> {
             if (launcherSettingsButton) startActivityForResult(
                     new Intent(this, LauncherSettingsActivity.class), LAUNCHER_SETTINGS_REQUEST);
             else open(systemIntent(Settings.ACTION_SETTINGS));
         });
+        makeIconOnly((TextView) btnSettings);
+        btnBoost = findViewById(R.id.btnBoost);
+        if (btnBoost != null) {
+            btnBoost.setOnClickListener(v -> cleanMemoryAndBoost());
+        }
         btnReorder = findViewById(R.id.btnReorder);
         btnReorder.setOnClickListener(v -> toggleReorder());
         btnReorder.setVisibility(cfg.reorderButton ? View.VISIBLE : View.GONE);
@@ -863,9 +945,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             showInputsPill = false;
             btnInputs.setVisibility(View.GONE);
             btnWifi.setVisibility(View.GONE);
-            ((TextView) btnSettings).setText(R.string.settings);
+            ((TextView) btnSettings).setText(null);
             ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_settings, 0, 0, 0);
-            if (!iconOnlyButtons) makeIconOnly((TextView) btnSettings);
+            makeIconOnly((TextView) btnSettings);
             btnSettings.setOnClickListener(v -> showTopMenu());
             // The lone gear sits at the header's middle, not on its bottom line like the row of pills.
             LinearLayout topButtons = findViewById(R.id.topButtons);
@@ -891,6 +973,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             showSettingsMenu();
             return true;
         });
+        makeIconOnly((TextView) btnSettings);
+        if (btnBluetooth != null) makeIconOnly(btnBluetooth);
+        btConnectedTint = getColorStateList(R.color.pill_icon_bt_connected);
+        btDisconnectedTint = getColorStateList(R.color.pill_icon_bt_disconnected);
+        updateBluetoothStatus();
 
         // Keep focus on the top bar at its ends and at the top: Android's focus finder would otherwise
         // jump to a tile far below when there is nothing in that direction.
@@ -904,20 +991,24 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 return true;
             }
             int firstButton = btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
-            int leftButton = rtlMenuBar ? R.id.btnSettings : firstButton;
-            int rightButton = rtlMenuBar ? firstButton : R.id.btnSettings;
+            int lastButton = (btnBoost != null && btnBoost.getVisibility() == View.VISIBLE) ? R.id.btnBoost : R.id.btnSettings;
+            int leftButton = rtlMenuBar ? lastButton : firstButton;
+            int rightButton = rtlMenuBar ? firstButton : lastButton;
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) return v.getId() == leftButton;
             return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == rightButton;
         };
         btnInputs.setOnKeyListener(pillKeys);
         btnWifi.setOnKeyListener(pillKeys);
+        if (btnBluetooth != null) btnBluetooth.setOnKeyListener(pillKeys);
         btnVpn.setOnKeyListener(pillKeys);
         btnSettings.setOnKeyListener(pillKeys);
+        if (btnBoost != null) btnBoost.setOnKeyListener(pillKeys);
         btnReorder.setOnKeyListener(pillKeys);
         btnLibraryTop.setOnKeyListener(pillKeys);
         for (View button : topAppButtons) button.setOnKeyListener(pillKeys);
         if (advancedEffects) {
-            List<View> pills = new ArrayList<>(Arrays.asList(btnInputs, btnWifi, btnVpn, btnReorder, btnLibraryTop, btnSettings));
+            List<View> pills = new ArrayList<>(Arrays.asList(btnInputs, btnWifi, btnBluetooth, btnVpn, btnReorder, btnLibraryTop, btnSettings));
+            if (btnBoost != null) pills.add(btnBoost);
             pills.addAll(topAppButtons);
             for (View button : pills) {
                 button.setOnFocusChangeListener((view, focused) -> view.animate()
@@ -1079,12 +1170,59 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         updateClockVisibility();
         clockRefresh.start();   // with timeReceiver: while Home is visible, paused or not
         tileRefresh.onStart();
+
+        if (bluetoothReceiver == null) {
+            bluetoothReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    updateBluetoothStatus();
+                }
+            };
+        }
+        IntentFilter btFilter = new IntentFilter();
+        btFilter.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
+        btFilter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
+        btFilter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+        btFilter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+        btFilter.addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(bluetoothReceiver, btFilter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(bluetoothReceiver, btFilter);
+            }
+        } catch (Throwable t) {
+            try {
+                registerReceiver(bluetoothReceiver, btFilter);
+            } catch (Throwable ignored) {}
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && btAudioCallback == null) {
+            try {
+                AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) {
+                    btAudioCallback = new AudioDeviceCallback() {
+                        @Override
+                        public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+                            updateBluetoothStatus();
+                        }
+                        @Override
+                        public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+                            updateBluetoothStatus();
+                        }
+                    };
+                    am.registerAudioDeviceCallback(btAudioCallback, handler);
+                }
+            } catch (Throwable ignored) {}
+        }
+        updateBluetoothStatus();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         resumed = true;
+        updateBluetoothStatus();
         // A festival that started or ended while Home was in the background: rebuild with or without it.
         if (festive != festival.active(LocalDate.now())) {
             recreate();
@@ -1134,6 +1272,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (gameDay != null) gameDay.start();
         sky.update();
         wallpaperPlayer.start();
+        long rx = android.net.TrafficStats.getTotalRxBytes();
+        long tx = android.net.TrafficStats.getTotalTxBytes();
+        if (rx != android.net.TrafficStats.UNSUPPORTED && tx != android.net.TrafficStats.UNSUPPORTED) {
+            lastTrafficBytes = rx + tx;
+            lastTrafficTime = System.currentTimeMillis();
+            handler.removeCallbacks(speedMeterTick);
+            handler.postDelayed(speedMeterTick, 1000);
+        }
         handler.postDelayed(minuteTick, MINUTE_MS);
         if (festive && lamp != null) {
             lamp.start();
@@ -1313,6 +1459,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ambient.animate().cancel();
         heroArt.animate().cancel();
         handler.removeCallbacks(minuteTick);
+        handler.removeCallbacks(speedMeterTick);
         handler.removeCallbacks(openWhenOnline);
         startPending = null;   // leaving Home before the network came back: the boot's app stays closed
         stopStats();
@@ -1331,6 +1478,19 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         super.onStop();
         started = false;
         unregisterReceiver(timeReceiver);
+        if (bluetoothReceiver != null) {
+            try {
+                unregisterReceiver(bluetoothReceiver);
+            } catch (Throwable ignored) {}
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && btAudioCallback != null) {
+            try {
+                AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) {
+                    am.unregisterAudioDeviceCallback(btAudioCallback);
+                }
+            } catch (Throwable ignored) {}
+        }
         clockRefresh.stop();
         handler.removeCallbacks(clockCheck);
         stopped = true;
@@ -2948,18 +3108,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 text = getString(R.string.offline);
                 vpn = false;
             } else if (ethernet) {
-                text = getString(R.string.ethernet);
+                text = getString(R.string.ethernet) + (!currentSpeedText.isEmpty() ? " (" + currentSpeedText + ")" : "");
                 icon = R.drawable.ic_ethernet;
                 flame = 4;
                 steady = true;
             } else if (wifi) {
                 WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
                 WifiInfo info = wm != null ? wm.getConnectionInfo() : null;
-                String ssid = info != null ? info.getSSID() : null;
                 flame = info != null ? Math.max(1, Math.min(4, WifiManager.calculateSignalLevel(info.getRssi(), 5))) : 3;
-                if (ssid != null) {
-                    ssid = ssid.replace("\"", "").trim();
-                    if (!ssid.isEmpty() && !ssid.contains("unknown") && !ssid.equals("0x")) text = ssid;
+                if (!currentSpeedText.isEmpty()) {
+                    text = getString(R.string.wifi) + " (" + currentSpeedText + ")";
+                } else {
+                    text = getString(R.string.wifi);
                 }
             }
         } catch (Exception ignored) {
@@ -3039,13 +3199,21 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Turns a labelled top pill into the round TopButtonIcon shape: no text, the icon centred by even padding. */
     private void makeIconOnly(TextView pill) {
-        pill.setContentDescription(pill.getText());
+        if (pill == null) return;
+        CharSequence text = pill.getText();
+        if (text != null && text.length() > 0) {
+            pill.setContentDescription(text);
+        }
         pill.setText(null);
         pill.setMaxWidth(Integer.MAX_VALUE);
         int pad = Math.round(10 * density);
         pill.setPaddingRelative(pad, 0, pad, 0);
         pill.setCompoundDrawablePadding(0);
-        pill.getLayoutParams().width = Math.round(42 * density);
+        ViewGroup.LayoutParams lp = pill.getLayoutParams();
+        if (lp != null) {
+            lp.width = Math.round(42 * density);
+            pill.setLayoutParams(lp);
+        }
     }
 
     // ---- festive skin ------------------------------------------------------------------------------
@@ -3133,6 +3301,623 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         open(i != null ? i : systemIntent(Settings.ACTION_WIFI_SETTINGS));
     }
 
+    private void openBluetooth() {
+        Intent btAddon = getPackageManager().getLeanbackLaunchIntentForPackage("com.gathin.btconnect");
+        if (btAddon != null) {
+            open(btAddon);
+            return;
+        }
+        Intent intent = new Intent("com.google.android.intent.action.CONNECT_INPUT");
+        if (intent.resolveActivity(getPackageManager()) != null) {
+            open(intent);
+            return;
+        }
+        open(systemIntent(Settings.ACTION_BLUETOOTH_SETTINGS));
+    }
+
+    private void updateBluetoothStatus() {
+        if (btnBluetooth == null) return;
+        boolean connected = isBluetoothConnected();
+        ColorStateList tint = connected ? btConnectedTint : btDisconnectedTint;
+        if (tint != null) {
+            btnBluetooth.setCompoundDrawableTintList(tint);
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private boolean isBluetoothConnected() {
+        // 1. Check AudioManager output devices for Bluetooth audio (requires no permissions)
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                AudioDeviceInfo[] devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+                if (devices != null) {
+                    for (AudioDeviceInfo d : devices) {
+                        int type = d.getType();
+                        if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                            type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            type == 26 /* TYPE_BLE_HEADSET */ ||
+                            type == 27 /* TYPE_BLE_SPEAKER */ ||
+                            type == 30 /* TYPE_BLE_BROADCAST */) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // 2. Check BluetoothAdapter
+        try {
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            if (adapter == null || !adapter.isEnabled()) {
+                return false;
+            }
+
+            // Check A2DP and HEADSET audio profiles
+            try {
+                if (adapter.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED) {
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            try {
+                if (adapter.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED) {
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            try {
+                if (adapter.getProfileConnectionState(21 /* HEARING_AID */) == BluetoothProfile.STATE_CONNECTED) {
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+
+            // Check bonded devices for any non-remote connected device (gamepads, keyboards, etc.)
+            try {
+                Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+                if (bonded != null) {
+                    for (BluetoothDevice device : bonded) {
+                        if (isTvRemote(device)) {
+                            continue;
+                        }
+                        if (isDeviceConnected(device)) {
+                            return true;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {}
+
+        // 3. Check InputManager for external gamepads/controllers
+        try {
+            InputManager im = (InputManager) getSystemService(Context.INPUT_SERVICE);
+            if (im != null) {
+                int[] ids = im.getInputDeviceIds();
+                for (int id : ids) {
+                    InputDevice dev = im.getInputDevice(id);
+                    if (dev == null || dev.isVirtual()) continue;
+                    if (dev.isExternal()) {
+                        String name = dev.getName();
+                        if (name != null) {
+                            String lower = name.toLowerCase(Locale.ROOT);
+                            if (!lower.contains("vrc") && !lower.contains("remote") && !lower.contains("sony tv")) {
+                                int sources = dev.getSources();
+                                if ((sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+                                    (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return false;
+    }
+
+    private boolean isDeviceConnected(BluetoothDevice device) {
+        if (device == null) return false;
+        try {
+            Method m = BluetoothDevice.class.getMethod("isConnected");
+            Object res = m.invoke(device);
+            if (res instanceof Boolean) {
+                return (Boolean) res;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private boolean isTvRemote(BluetoothDevice device) {
+        if (device == null) return false;
+        try {
+            BluetoothClass bc = device.getBluetoothClass();
+            if (bc != null && bc.getMajorDeviceClass() == BluetoothClass.Device.Major.AUDIO_VIDEO) {
+                return false; // Audio/Video devices (soundbars, headphones, speakers) are never remotes
+            }
+            String name = device.getName();
+            if (name != null) {
+                String lower = name.toLowerCase(Locale.ROOT);
+                if (lower.contains("vrc") ||
+                    lower.contains("remote") ||
+                    lower.contains("voice rc") ||
+                    lower.contains("sony tv") ||
+                    lower.contains("bravia") ||
+                    lower.contains("mic") ||
+                    lower.contains("rc-") ||
+                    lower.contains("rc_")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private boolean isSystemPkg(String pkg) {
+        return "android".equals(pkg)
+                || "com.android.systemui".equals(pkg)
+                || (pkg != null && pkg.startsWith("com.google.android.inputmethod"))
+                || "com.google.android.gms".equals(pkg)
+                || "com.sony.dtv.sonysystemservice".equals(pkg);
+    }
+
+    /**
+     * Shows the Recent Opened Apps panel hanging under the Recent Apps pill,
+     * with each app's icon, name, last opened time, and a dedicated Close button
+     * to terminate that app from background and reclaim RAM.
+     */
+    private void showRecentApps() {
+        boolean underGear = topMenu;
+        View anchor = findViewById(underGear ? R.id.btnSettings : R.id.btnInputs);
+        if (anchor == null) return;
+
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+
+        PackageManager pm = getPackageManager();
+        String myPkg = getPackageName();
+
+        // 1. Collect recorded recent packages
+        List<String> rawPkgs = LastOpened.getRecentPackages(this);
+        List<String> recentPkgs = new ArrayList<>();
+        for (String p : rawPkgs) {
+            if (p == null || p.equals(myPkg) || isSystemPkg(p)) continue;
+            try {
+                pm.getApplicationInfo(p, 0);
+                if (!recentPkgs.contains(p)) recentPkgs.add(p);
+            } catch (PackageManager.NameNotFoundException ignored) {}
+        }
+
+        int width = Math.max(anchor.getWidth(), (int) (320 * density));
+        final PopupWindow popup = glassPopup(panel, width);
+
+        final View[] closeAllRef = new View[1];
+        final View[] sepRef = new View[1];
+
+        if (recentPkgs.isEmpty()) {
+            View emptyRow = getLayoutInflater().inflate(R.layout.item_input, rows, false);
+            ((ImageView) emptyRow.findViewById(R.id.icon)).setImageResource(R.drawable.ic_recents);
+            ((TextView) emptyRow.findViewById(R.id.title)).setText(R.string.no_recent_apps);
+            TextView status = emptyRow.findViewById(R.id.status);
+            status.setText("Memory optimized");
+            status.setVisibility(View.VISIBLE);
+            emptyRow.findViewById(R.id.dot).setVisibility(View.GONE);
+            rows.addView(emptyRow);
+        } else {
+            for (String pkg : recentPkgs) {
+                try {
+                    ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
+                    CharSequence label = pm.getApplicationLabel(ai);
+                    Drawable icon = pm.getApplicationIcon(ai);
+
+                    View row = getLayoutInflater().inflate(R.layout.item_recent_app, rows, false);
+                    ImageView imgIcon = row.findViewById(R.id.appIcon);
+                    TextView txtTitle = row.findViewById(R.id.appTitle);
+                    TextView txtStatus = row.findViewById(R.id.appStatus);
+                    View appArea = row.findViewById(R.id.appArea);
+                    TextView btnClose = row.findViewById(R.id.btnClose);
+
+                    imgIcon.setImageDrawable(icon);
+                    txtTitle.setText(label);
+
+                    long when = LastOpened.get(this, pkg);
+                    if (when > 0) {
+                        txtStatus.setText(getString(R.string.last_opened, LastOpened.describe(this, when)));
+                    } else {
+                        txtStatus.setText("Running in background");
+                    }
+
+                    // Click app: open / switch to it
+                    final String targetPkg = pkg;
+                    final CharSequence targetLabel = label;
+                    appArea.setOnClickListener(v -> {
+                        popup.dismiss();
+                        Intent launch = pm.getLaunchIntentForPackage(targetPkg);
+                        if (launch != null) {
+                            open(launch);
+                            LastOpened.record(MainActivity.this, targetPkg);
+                        } else {
+                            Toast.makeText(MainActivity.this, R.string.not_available, Toast.LENGTH_SHORT).show();
+                        }
+                    });
+
+                    // Long click app: close from background
+                    appArea.setOnLongClickListener(v -> {
+                        closeAppFromBackground(targetPkg, targetLabel.toString(), row, rows, recentPkgs, sepRef[0], closeAllRef[0]);
+                        return true;
+                    });
+
+                    // Click Close button: close from background
+                    btnClose.setOnClickListener(v -> {
+                        closeAppFromBackground(targetPkg, targetLabel.toString(), row, rows, recentPkgs, sepRef[0], closeAllRef[0]);
+                    });
+
+                    rows.addView(row);
+                } catch (Throwable ignored) {}
+            }
+
+            // Separator and "Close all background apps" action
+            if (rows.getChildCount() > 0) {
+                sepRef[0] = addSeparator(rows);
+                closeAllRef[0] = addInputRow(rows, popup, R.drawable.ic_rocket, getString(R.string.close_all_background), -1, () -> {
+                    closeAllBackgroundApps(recentPkgs, popup);
+                });
+            }
+        }
+
+        // TV Inputs option at the bottom so user never loses TV input access
+        addSeparator(rows);
+        addInputRow(rows, popup, R.drawable.ic_input, getString(R.string.tv_inputs_label), -1, () -> {
+            root.post(this::showInputs);
+        });
+
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        popup.setWidth(Math.max((int) (320 * density), Math.min(panel.getMeasuredWidth(), (int) (400 * density))));
+
+        int alignment = getResources().getBoolean(R.bool.rtl_menu_bar) != underGear ? Gravity.END : Gravity.START;
+        dropIn(popup, panel, anchor, alignment);
+
+        // Focus first app item
+        for (int i = 0; i < rows.getChildCount(); i++) {
+            View child = rows.getChildAt(i);
+            View appArea = child.findViewById(R.id.appArea);
+            if (appArea != null && appArea.isFocusable()) {
+                appArea.requestFocus();
+                break;
+            } else if (child.isFocusable()) {
+                child.requestFocus();
+                break;
+            }
+        }
+    }
+
+    private void cutAudio() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    AudioAttributes attrs = new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build();
+                    AudioFocusRequest req = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                            .setAudioAttributes(attrs)
+                            .build();
+                    am.requestAudioFocus(req);
+                    am.abandonAudioFocusRequest(req);
+                } else {
+                    am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+                    am.abandonAudioFocus(null);
+                }
+                long now = SystemClock.uptimeMillis();
+                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
+                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
+                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP, 0));
+                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP, 0));
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private void sendShellCommand(String cmd) {
+        if (cmd == null || cmd.isEmpty()) return;
+        new Thread(() -> {
+            try (Socket s = new Socket()) {
+                s.connect(new InetSocketAddress("127.0.0.1", 18888), 500);
+                s.setSoTimeout(1000);
+                OutputStream out = s.getOutputStream();
+                out.write((cmd + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                android.util.Log.i("TVHOME", "Sent shell command: " + cmd.replace('\n', ' '));
+            } catch (Throwable t) {
+                android.util.Log.e("TVHOME", "Shell send failed: " + t.getMessage());
+            }
+        }).start();
+    }
+
+    private void terminateApp(String pkg) {
+        if (pkg == null || pkg.isEmpty() || pkg.equals(getPackageName()) || isSystemPkg(pkg)) return;
+        cutAudio();
+        sendShellCommand("am force-stop " + pkg + (pkg.equals("com.google.android.youtube.tv") ? "\nam force-stop com.google.android.youtube.tv.recommendations" : ""));
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                am.killBackgroundProcesses(pkg);
+                if ("com.google.android.youtube.tv".equals(pkg)) {
+                    am.killBackgroundProcesses("com.google.android.youtube.tv.recommendations");
+                }
+            }
+        } catch (Throwable ignored) {}
+        LastOpened.remove(this, pkg);
+        LastOpened.markClosed(this, pkg);
+    }
+
+    private void terminateApps(Collection<String> pkgs) {
+        if (pkgs == null || pkgs.isEmpty()) return;
+        String myPkg = getPackageName();
+        cutAudio();
+        StringBuilder sb = new StringBuilder();
+        ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        for (String pkg : pkgs) {
+            if (pkg == null || pkg.equals(myPkg) || isSystemPkg(pkg)) continue;
+            sb.append("am force-stop ").append(pkg).append("\n");
+            if ("com.google.android.youtube.tv".equals(pkg)) {
+                sb.append("am force-stop com.google.android.youtube.tv.recommendations\n");
+            }
+            if (am != null) {
+                try {
+                    am.killBackgroundProcesses(pkg);
+                    if ("com.google.android.youtube.tv".equals(pkg)) {
+                        am.killBackgroundProcesses("com.google.android.youtube.tv.recommendations");
+                    }
+                } catch (Throwable ignored) {}
+            }
+            LastOpened.remove(this, pkg);
+            LastOpened.markClosed(this, pkg);
+        }
+        if (sb.length() > 0) {
+            sendShellCommand(sb.toString());
+        }
+    }
+
+    private void closeAppFromBackground(String pkg, String appName, View rowView, LinearLayout rows,
+                                        List<String> recentPkgs, View sepView, View closeAllView) {
+        terminateApp(pkg);
+        if (recentPkgs != null) {
+            recentPkgs.remove(pkg);
+        }
+
+        System.gc();
+        Runtime.getRuntime().gc();
+
+        if (rowView != null && rows != null) {
+            rowView.animate()
+                    .alpha(0f)
+                    .translationX(-30f * density)
+                    .setDuration(180)
+                    .withEndAction(() -> {
+                        rows.removeView(rowView);
+                        if (recentPkgs != null && recentPkgs.isEmpty()) {
+                            if (sepView != null) rows.removeView(sepView);
+                            if (closeAllView != null) rows.removeView(closeAllView);
+                            View emptyRow = getLayoutInflater().inflate(R.layout.item_input, rows, false);
+                            ((ImageView) emptyRow.findViewById(R.id.icon)).setImageResource(R.drawable.ic_recents);
+                            ((TextView) emptyRow.findViewById(R.id.title)).setText(R.string.no_recent_apps);
+                            TextView status = emptyRow.findViewById(R.id.status);
+                            status.setText("Memory optimized");
+                            status.setVisibility(View.VISIBLE);
+                            emptyRow.findViewById(R.id.dot).setVisibility(View.GONE);
+                            rows.addView(emptyRow, 0);
+                        }
+                    })
+                    .start();
+        }
+
+        Toast.makeText(this, "🛑 " + appName + " " + getString(R.string.close_from_background).toLowerCase(Locale.ROOT), Toast.LENGTH_SHORT).show();
+    }
+
+    private void closeAllBackgroundApps(List<String> pkgs, PopupWindow popup) {
+        ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        ActivityManager.MemoryInfo memBefore = new ActivityManager.MemoryInfo();
+        if (am != null) am.getMemoryInfo(memBefore);
+
+        int count = pkgs != null ? pkgs.size() : 0;
+        terminateApps(pkgs);
+        LastOpened.clear(this);
+        LastOpened.markAllClosed(this);
+
+        System.gc();
+        Runtime.getRuntime().gc();
+
+        ActivityManager.MemoryInfo memAfter = new ActivityManager.MemoryInfo();
+        if (am != null) am.getMemoryInfo(memAfter);
+        long freed = Math.max(0, memAfter.availMem - memBefore.availMem);
+        long freedMb = freed / (1024 * 1024);
+
+        if (popup != null) popup.dismiss();
+
+        String msg = freedMb > 5
+                ? "🚀 Closed " + count + " apps (" + freedMb + " MB RAM freed)"
+                : "🚀 Closed " + count + " background apps";
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+    }
+
+    private void cleanMemoryAndBoost() {
+        if (btnBoost != null) {
+            btnBoost.animate()
+                    .translationY(-18f * density)
+                    .scaleX(1.25f)
+                    .scaleY(1.25f)
+                    .setDuration(180)
+                    .withEndAction(() -> {
+                        btnBoost.animate()
+                                .translationY(0f)
+                                .scaleX(1.0f)
+                                .scaleY(1.0f)
+                                .setDuration(260)
+                                .setInterpolator(new android.view.animation.OvershootInterpolator(2.2f))
+                                .start();
+                    })
+                    .start();
+        }
+
+        new Thread(() -> {
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return;
+
+            ActivityManager.MemoryInfo memBefore = new ActivityManager.MemoryInfo();
+            am.getMemoryInfo(memBefore);
+            long availBefore = memBefore.availMem;
+
+            Set<String> toKill = new HashSet<>(LastOpened.getRecentPackages(this));
+            PackageManager pm = getPackageManager();
+            List<ApplicationInfo> packages = pm.getInstalledApplications(0);
+            for (ApplicationInfo app : packages) {
+                if (app == null || app.packageName == null) continue;
+                if ((app.flags & ApplicationInfo.FLAG_SYSTEM) == 0 && !isSystemPkg(app.packageName)) {
+                    toKill.add(app.packageName);
+                }
+            }
+
+            terminateApps(toKill);
+            LastOpened.clear(MainActivity.this);
+            LastOpened.markAllClosed(MainActivity.this);
+
+            System.gc();
+            Runtime.getRuntime().gc();
+
+            try {
+                Thread.sleep(450);
+            } catch (InterruptedException ignored) {}
+
+            ActivityManager.MemoryInfo memAfter = new ActivityManager.MemoryInfo();
+            am.getMemoryInfo(memAfter);
+            long availAfter = memAfter.availMem;
+            long freed = availAfter - availBefore;
+
+            runOnUiThread(() -> {
+                String msg;
+                if (freed > 5 * 1024 * 1024) {
+                    long freedMb = freed / (1024 * 1024);
+                    msg = "🚀 Boosted! " + freedMb + " MB RAM freed (" + formatRam(availAfter) + " available)";
+                } else {
+                    msg = "🚀 Memory Optimized! " + formatRam(availAfter) + " RAM available";
+                }
+                Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
+            });
+        }).start();
+    }
+
+    private static String formatRam(long bytes) {
+        long mb = bytes / (1024 * 1024);
+        if (mb >= 1024) {
+            return String.format(java.util.Locale.US, "%.1f GB", mb / 1024.0);
+        }
+        return mb + " MB";
+    }
+
+    private Dialog castDialog;
+
+    private void showCastDialog() {
+        if (castDialog != null && castDialog.isShowing()) return;
+
+        View panel = getLayoutInflater().inflate(R.layout.dialog_cast, root, false);
+        final Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setContentView(panel);
+        dialog.setCanceledOnTouchOutside(true);
+        Window w = dialog.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.setDimAmount(0.6f);
+        }
+
+        String devName = android.provider.Settings.Global.getString(getContentResolver(), "device_name");
+        if (TextUtils.isEmpty(devName)) devName = "Bedroom";
+
+        String wifiName = "";
+        try {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                WifiInfo wi = wm.getConnectionInfo();
+                if (wi != null) {
+                    String ssid = wi.getSSID();
+                    if (ssid != null && !ssid.equals("<unknown ssid>") && !ssid.isEmpty()) {
+                        wifiName = ssid.replace("\"", "");
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        TextView infoView = panel.findViewById(R.id.castDeviceInfo);
+        if (infoView != null) {
+            String infoText = "Device: " + devName;
+            if (!wifiName.isEmpty()) {
+                infoText += "   •   Wi-Fi: " + wifiName;
+            }
+            infoView.setText(infoText);
+        }
+
+        TextView laptopSteps = panel.findViewById(R.id.castLaptopSteps);
+        if (laptopSteps != null) {
+            laptopSteps.setText("1. Open Google Chrome or Microsoft Edge\n" +
+                               "2. Click Menu (\u22EE) \u2192 Cast... (or right-click \u2192 Cast)\n" +
+                               "3. Click Sources \u2192 Cast screen (to share full desktop)\n" +
+                               "4. Select " + devName + " to connect");
+        }
+
+        TextView btnAirPlay = panel.findViewById(R.id.btnCastAirPlay);
+        TextView btnSettings = panel.findViewById(R.id.btnCastSettings);
+        TextView btnClose = panel.findViewById(R.id.btnCastClose);
+
+        if (btnAirPlay != null) {
+            btnAirPlay.setOnClickListener(v -> {
+                dialog.dismiss();
+                openAirPlay();
+            });
+        }
+
+        if (btnSettings != null) {
+            btnSettings.setOnClickListener(v -> {
+                dialog.dismiss();
+                openCastSettings();
+            });
+        }
+
+        if (btnClose != null) {
+            btnClose.setOnClickListener(v -> dialog.dismiss());
+            btnClose.requestFocus();
+        }
+
+        dialog.setOnDismissListener(d -> {
+            if (castDialog == dialog) castDialog = null;
+            restoreFocus();
+        });
+
+        castDialog = dialog;
+        dialog.show();
+    }
+
+    private void openAirPlay() {
+        Intent ap = new Intent().setComponent(new ComponentName("com.sony.dtv.airplayapp", "com.sony.dtv.airplayapp.AirPlayPlayer"));
+        if (ap.resolveActivity(getPackageManager()) != null) {
+            open(ap);
+            return;
+        }
+        Intent launch = getPackageManager().getLaunchIntentForPackage("com.sony.dtv.airplayapp");
+        if (launch != null) open(launch);
+    }
+
+    private void openCastSettings() {
+        Intent intent = new Intent("com.google.android.settings.CAST_RECEIVER_SETTINGS");
+        intent.setComponent(new ComponentName("com.google.android.apps.mediashell", "com.google.android.apps.mediashell.settings.CastSettingsActivity"));
+        if (intent.resolveActivity(getPackageManager()) != null) {
+            open(intent);
+            return;
+        }
+        Intent fallback = new Intent("com.google.android.settings.CAST_RECEIVER_SETTINGS");
+        if (fallback.resolveActivity(getPackageManager()) != null) {
+            open(fallback);
+        }
+    }
+
     /** vpn_app's launch intent, or null when none is set or it is not installed. */
     private Intent vpnAppIntent() {
         if (vpnApp.isEmpty()) return null;
@@ -3197,25 +3982,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         return SystemSettings.intent(this, standardAction);
     }
 
-    /** Hides the Inputs pill when it would have nothing to list: streaming boxes have no HDMI-in, AV or tuner. */
+    /** Updates the Recent Apps / Inputs pill visibility. */
     private void updateInputsButton() {
-        if (!showInputsPill) {
-            btnInputs.setVisibility(View.GONE);
-            return;
-        }
-        boolean any = liveTvIntent() != null || !sourcePanelService.isEmpty()
-                || (coocaaSources && !CoocaaSources.list(this).isEmpty());
-        TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
-        if (!any && tim != null) {
-            for (TvInputInfo info : tim.getTvInputList()) {
-                // Inputs hidden in Settings > Inputs are left out of the menu, so they don't count here either.
-                if (info.isPassthroughInput() && !info.isHidden(this)) {
-                    any = true;
-                    break;
-                }
-            }
-        }
-        btnInputs.setVisibility(any ? View.VISIBLE : View.GONE);
+        if (btnInputs == null) return;
+        btnInputs.setVisibility(showInputsPill ? View.VISIBLE : View.GONE);
     }
 
     /** boot_to_live_tv, or the Open on start app: the first time Home comes up after the TV starts, open that app
@@ -3294,9 +4064,27 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     }
 
     private void open(Intent i) {
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        String pkg = null;
+        if (i.getComponent() != null) {
+            pkg = i.getComponent().getPackageName();
+        } else if (i.getPackage() != null) {
+            pkg = i.getPackage();
+        }
+        boolean fresh = pkg != null && LastOpened.isClosed(this, pkg);
+        if (fresh) {
+            if ("com.google.android.youtube.tv".equals(pkg)) {
+                i = new Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube://")).setPackage(pkg);
+            }
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            LastOpened.unmarkClosed(this, pkg);
+        } else {
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
         try {
             startActivity(i);
+            if (pkg != null) {
+                LastOpened.record(this, pkg);
+            }
         } catch (ActivityNotFoundException | SecurityException e) {
             Toast.makeText(this, R.string.not_available, Toast.LENGTH_SHORT).show();
         }
@@ -3577,6 +4365,19 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (rows.getChildCount() > 0) addSeparator(rows);
             final Intent liveTvIntent = liveTv;
             addInputRow(rows, popup, R.drawable.ic_livetv, getString(R.string.live_tv), -1, () -> open(liveTvIntent));
+        }
+
+        if (rows.getChildCount() > 0) addSeparator(rows);
+        addInputRow(rows, popup, R.drawable.ic_cast, "Cast", -1, () -> {
+            popup.dismiss();
+            showCastDialog();
+        });
+        Intent airplayCheck = new Intent().setComponent(new ComponentName("com.sony.dtv.airplayapp", "com.sony.dtv.airplayapp.AirPlayPlayer"));
+        if (airplayCheck.resolveActivity(getPackageManager()) != null) {
+            addInputRow(rows, popup, R.drawable.ic_airplay, "AirPlay", -1, () -> {
+                popup.dismiss();
+                openAirPlay();
+            });
         }
         if (rows.getChildCount() == 0) {
             Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show();

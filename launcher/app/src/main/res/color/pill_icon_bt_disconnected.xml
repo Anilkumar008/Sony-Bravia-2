@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bluetooth disconnected: vibrant red when unfocused; dark red when focused on the white pill. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="#FFB71C1C" />
+    <item android:color="#FFFF453A" />
+</selector>

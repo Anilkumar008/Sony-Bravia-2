@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.net.Uri;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -507,12 +508,29 @@ final class AppLibraryDialog {
 
     private void open(ResolveInfo app) {
         close();
-        Intent intent = new Intent(Intent.ACTION_MAIN).setComponent(
-                new ComponentName(app.activityInfo.packageName, app.activityInfo.name));
-        // TV apps keep the leanback launch intent, so an app already running resumes instead of restarting.
-        if (tvPackages.contains(app.activityInfo.packageName)) intent.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-        try { activity.startActivity(intent); }
+        String pkg = app.activityInfo.packageName;
+        boolean fresh = LastOpened.isClosed(activity, pkg);
+        Intent intent;
+        if ("com.google.android.youtube.tv".equals(pkg) && fresh) {
+            intent = new Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube://"))
+                    .setPackage(pkg)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        } else {
+            intent = new Intent(Intent.ACTION_MAIN).setComponent(
+                    new ComponentName(pkg, app.activityInfo.name));
+            // TV apps keep the leanback launch intent, so an app already running resumes instead of restarting.
+            if (tvPackages.contains(pkg)) intent.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+            if (fresh) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            } else {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+            }
+        }
+        LastOpened.unmarkClosed(activity, pkg);
+        try {
+            activity.startActivity(intent);
+            LastOpened.record(activity, pkg);
+        }
         catch (ActivityNotFoundException | SecurityException e) {
             Toast.makeText(activity, activity.getString(R.string.cant_open, label(app)), Toast.LENGTH_SHORT).show();
         }
