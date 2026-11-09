@@ -143,7 +143,9 @@ final class ClockScene {
             wallpaperFile = current != null ? current : rotation.get(0);
             // Home only rotates while it is visible, so the screensaver carries the rotation on
             // itself; without this it holds one picture for as long as it is up.
-            rotationMs = cfg.wallpaperRotationMinutes * 60_000L;
+            long secInterval = cfg.wallpaperRotationSeconds > 0 ? cfg.wallpaperRotationSeconds * 1000L : 0;
+            long minInterval = cfg.wallpaperRotationMinutes > 0 ? cfg.wallpaperRotationMinutes * 60_000L : 0;
+            rotationMs = secInterval > 0 ? secInterval : minInterval;
             order = cfg.wallpaperOrder;
             moods = cfg.wallpaperMoods;
             latitude = moods.isEmpty() ? "" : ctx.getString(R.string.latitude);
@@ -267,3 +269,4 @@ final class ClockScene {
         glow.setColors(new int[]{0x40000000 | c, 0x14000000 | c, 0x00000000 | c});
     }
 }
+

@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -32,7 +34,10 @@ import java.util.concurrent.Executors;
 /** Displays and rotates a theme's local wallpaper images while Home is visible. */
 final class WallpaperPlayer {
     private final FrameLayout root;
-    private final ImageView image;
+    private final FrameLayout container;
+    private final ImageView imageA;
+    private final ImageView imageB;
+    private boolean showingA = true;
     private final int backgroundColor;
     private final List<File> files;
     private final long interval;
@@ -52,6 +57,18 @@ final class WallpaperPlayer {
     private boolean closed;
     private boolean loading;
     private String displayed = "";
+    private long lastChangeTime = 0;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable rotationTask = new Runnable() {
+        @Override
+        public void run() {
+            if (!active || closed) return;
+            update();
+            if (interval > 0 && interval < 60_000L) {
+                handler.postDelayed(this, interval);
+            }
+        }
+    };
     /** wallpaper_captions: the shown picture's name from wallpapers/captions.txt; null when off or there are none. */
     private final TextView caption;
     private final Map<String, String> names;
@@ -66,7 +83,9 @@ final class WallpaperPlayer {
         this.root = root;
         backgroundColor = config.backgroundColor;
         files = new ArrayList<>(config.wallpapers);
-        interval = config.wallpaperRotationMinutes * 60_000L;
+        long secInterval = config.wallpaperRotationSeconds > 0 ? config.wallpaperRotationSeconds * 1000L : 0;
+        long minInterval = config.wallpaperRotationMinutes > 0 ? config.wallpaperRotationMinutes * 60_000L : 0;
+        interval = secInterval > 0 ? secInterval : minInterval;
         bitmapConfig = config.wallpaperTrueColor ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565;
         // The dim is painted into the picture (decode), so no full-screen shade layer is drawn on every frame.
         dimColor = config.wallpaperDim > 0 ? (config.wallpaperDim * 255 / 100) << 24 : 0;
@@ -85,14 +104,29 @@ final class WallpaperPlayer {
         DisplayMetrics metrics = context.getResources().getDisplayMetrics();
         width = metrics.widthPixels;
         height = metrics.heightPixels;
-        image = new ImageView(context);
-        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+
+        container = new FrameLayout(context);
+        container.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+
+        imageA = new ImageView(context);
+        imageA.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imageA.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+
+        imageB = new ImageView(context);
+        imageB.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imageB.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        imageB.setAlpha(0f);
+
+        container.addView(imageB, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        container.addView(imageA, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
         names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
                 ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
         caption = names.isEmpty() ? null : makeCaption(context, root);
         if (config.wallpaperEnabled && !files.isEmpty()) {
-            root.addView(image, 0, new FrameLayout.LayoutParams(
+            root.addView(container, 0, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             showFirst();
         }
@@ -115,10 +149,11 @@ final class WallpaperPlayer {
                 // The picture covers the whole screen: the root's plain colour under it is overdraw.
                 root.setBackground(null);
                 displayed = first.getName();
+                lastChangeTime = System.currentTimeMillis();
                 showCaption(false);
                 if (!displayed.equals(previous)) {
                     preferences.edit().putString("image", displayed)
-                            .putLong("changed", System.currentTimeMillis()).apply();
+                            .putLong("changed", lastChangeTime).apply();
                 }
                 return;
             }
@@ -130,17 +165,27 @@ final class WallpaperPlayer {
 
     void start() {
         active = true;
+        handler.removeCallbacks(rotationTask);
         update();
+        if (interval > 0 && interval < 60_000L) {
+            handler.postDelayed(rotationTask, interval);
+        }
     }
 
     void stop() {
         active = false;
+        handler.removeCallbacks(rotationTask);
+        if (!TextUtils.isEmpty(displayed)) {
+            preferences.edit().putString("image", displayed)
+                    .putLong("changed", lastChangeTime).apply();
+        }
     }
 
     /** Drops the wallpaper texture when Home is hidden and Android asks the process to free memory. */
     void releaseForMemoryPressure() {
         if (current == null) return;
-        image.setImageDrawable(null);
+        imageA.setImageDrawable(null);
+        imageB.setImageDrawable(null);
         // The renderer may still have a queued frame that references this hardware bitmap. Drop our references and
         // let Android reclaim its native buffer after rendering releases it instead of recycling it mid-frame.
         current = null;
@@ -162,18 +207,19 @@ final class WallpaperPlayer {
     void close() {
         active = false;
         closed = true;
+        handler.removeCallbacks(rotationTask);
         decoder.shutdownNow();
     }
 
     void update() {
         if (!active || closed || loading || files.isEmpty()) return;
-        String previous = preferences.getString("image", "");
+        String currentImage = !TextUtils.isEmpty(displayed) ? displayed : preferences.getString("image", "");
         // A picture outside the time of day's group (the group changed) is replaced at once, not after the interval.
         List<File> playable = playable();
-        File selected = WallpaperRotation.find(playable, previous);
-        long changed = preferences.getLong("changed", 0);
+        File selected = WallpaperRotation.find(playable, currentImage);
+        long changed = lastChangeTime > 0 ? lastChangeTime : preferences.getLong("changed", 0);
         if (selected == null || WallpaperRotation.due(changed, System.currentTimeMillis(), interval)) {
-            selected = WallpaperRotation.pick(playable, previous, order, random);
+            selected = WallpaperRotation.pick(playable, currentImage, order, random);
         }
         if (selected == null || selected.getName().equals(displayed)) return;
         File next = selected;
@@ -195,9 +241,12 @@ final class WallpaperPlayer {
                 show(bitmap);
                 displayed = next.getName();
                 showCaption(true);
-                if (!displayed.equals(previous) || changed == 0) {
-                    preferences.edit().putString("image", displayed)
-                            .putLong("changed", System.currentTimeMillis()).apply();
+                lastChangeTime = System.currentTimeMillis();
+                if (interval >= 60_000L) {
+                    if (!displayed.equals(currentImage) || changed == 0) {
+                        preferences.edit().putString("image", displayed)
+                                .putLong("changed", lastChangeTime).apply();
+                    }
                 }
             });
         });
@@ -259,14 +308,35 @@ final class WallpaperPlayer {
         return key.toString();
     }
 
-    /** Puts a picture on screen and releases the previous one after a frame has drawn the new one. */
+    /** Puts a picture on screen with smooth crossfade and releases the previous one after transition. */
     private void show(Bitmap bitmap) {
+        root.setBackground(null);
+        if (current == null) {
+            current = bitmap;
+            imageA.setImageBitmap(bitmap);
+            imageA.setAlpha(1f);
+            imageB.setImageDrawable(null);
+            imageB.setAlpha(0f);
+            showingA = true;
+            return;
+        }
+        ImageView incoming = showingA ? imageB : imageA;
+        ImageView outgoing = showingA ? imageA : imageB;
+        showingA = !showingA;
+
         Bitmap old = current;
         current = bitmap;
-        // The wallpaper covers the whole root; avoid drawing the fallback colour under it.
-        root.setBackground(null);
-        image.setImageBitmap(bitmap);
-        if (old != null && old != bitmap) image.postDelayed(old::recycle, 500);
+
+        incoming.setImageBitmap(bitmap);
+        incoming.bringToFront();
+        incoming.setAlpha(0f);
+        incoming.animate().alpha(1f).setDuration(400).start();
+        outgoing.animate().alpha(0f).setDuration(400).withEndAction(() -> {
+            outgoing.setImageDrawable(null);
+            if (old != null && old != bitmap && !old.isRecycled()) {
+                old.recycle();
+            }
+        }).start();
     }
 
     private Bitmap decode(File file) {
