@@ -376,9 +376,7 @@
     <bool name="always_show_names">false</bool>
     <!-- Wallpapers decode as RGB_565 (2 bytes a pixel, 4 MB at 1080p), which bands dark gradients such as a night
          sky, most of all under wallpaper_dim. true decodes them in 32-bit colour: 8 MB, for TVs with 2 GB or more. -->
-    <bool name="wallpaper_true_color">true</bool>
-    <!-- Rotate wallpapers every N seconds. 0 keeps wallpaper_rotation_minutes. Default 3 for rapid nature slideshow. -->
-    <integer name="wallpaper_rotation_seconds">10</integer>
+    <bool name="wallpaper_true_color">false</bool>
     <!-- Rotating wallpapers: show each picture's name under the top-right buttons, from a captions.txt next to the
          pictures in wallpapers/ ("01-dusk.jpg<TAB>Dusk over the peaks", one per line). A picture without a line
          shows no name. Can also be set with "wallpaper_captions": true in a theme's config.json. -->
@@ -461,7 +459,7 @@
          before settling. false: both go straight there, with no bounce, while scrolling stays smooth
          (reduced_motion also removes the overshoot, but scrolls in one jump). Can also be set with
          "focus_overshoot" in a theme's config.json. -->
-    <bool name="focus_overshoot">true</bool>
+    <bool name="focus_overshoot">false</bool>
 
     <!-- One line under the clock: CPU, free memory and free storage. Off by default; a theme can set
          "show_stats": true. Nothing is read, and the clock does not move, while this is false. -->

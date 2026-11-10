@@ -5,18 +5,11 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
-import android.graphics.Matrix;
-import android.graphics.SurfaceTexture;
-import android.media.MediaPlayer;
-import android.os.Handler;
-import android.os.Looper;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
-import android.view.Surface;
-import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -39,10 +32,7 @@ import java.util.concurrent.Executors;
 /** Displays and rotates a theme's local wallpaper images while Home is visible. */
 final class WallpaperPlayer {
     private final FrameLayout root;
-    private final FrameLayout container;
-    private final ImageView imageA;
-    private final ImageView imageB;
-    private boolean showingA = true;
+    private final ImageView image;
     private final int backgroundColor;
     private final List<File> files;
     private final long interval;
@@ -62,23 +52,6 @@ final class WallpaperPlayer {
     private boolean closed;
     private boolean loading;
     private String displayed = "";
-    private long lastChangeTime = 0;
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Runnable rotationTask = new Runnable() {
-        @Override
-        public void run() {
-            if (!active || closed) return;
-            update();
-            if (interval > 0 && interval < 60_000L) {
-                handler.postDelayed(this, interval);
-            }
-        }
-    };
-    private final File videoFile;
-    private TextureView videoView;
-    private Surface videoSurface;
-    private MediaPlayer videoPlayer;
-    private boolean videoSurfaceReady;
     /** wallpaper_captions: the shown picture's name from wallpapers/captions.txt; null when off or there are none. */
     private final TextView caption;
     private final Map<String, String> names;
@@ -93,9 +66,7 @@ final class WallpaperPlayer {
         this.root = root;
         backgroundColor = config.backgroundColor;
         files = new ArrayList<>(config.wallpapers);
-        long secInterval = config.wallpaperRotationSeconds > 0 ? config.wallpaperRotationSeconds * 1000L : 0;
-        long minInterval = config.wallpaperRotationMinutes > 0 ? config.wallpaperRotationMinutes * 60_000L : 0;
-        interval = secInterval > 0 ? secInterval : minInterval;
+        interval = config.wallpaperRotationMinutes * 60_000L;
         bitmapConfig = config.wallpaperTrueColor ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565;
         // The dim is painted into the picture (decode), so no full-screen shade layer is drawn on every frame.
         dimColor = config.wallpaperDim > 0 ? (config.wallpaperDim * 255 / 100) << 24 : 0;
@@ -114,79 +85,16 @@ final class WallpaperPlayer {
         DisplayMetrics metrics = context.getResources().getDisplayMetrics();
         width = metrics.widthPixels;
         height = metrics.heightPixels;
-
-        container = new FrameLayout(context);
-        container.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-
-        imageA = new ImageView(context);
-        imageA.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        imageA.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-
-        imageB = new ImageView(context);
-        imageB.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        imageB.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        imageB.setAlpha(0f);
-
-        container.addView(imageB, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        container.addView(imageA, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        videoFile = findVideoWallpaper(context);
-        if (videoFile != null) {
-            imageA.setVisibility(View.GONE);
-            imageB.setVisibility(View.GONE);
-            videoView = new TextureView(context);
-            videoView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
-                @Override
-                public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int w, int h) {
-                    if (videoSurface != null) {
-                        videoSurface.release();
-                    }
-                    videoSurface = new Surface(surfaceTexture);
-                    videoSurfaceReady = true;
-                    if (active && !closed) {
-                        startVideoPlayer();
-                    }
-                }
-
-                @Override
-                public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int w, int h) {
-                    applyVideoScale();
-                }
-
-                @Override
-                public boolean onSurfaceTextureDestroyed(SurfaceTexture surfaceTexture) {
-                    videoSurfaceReady = false;
-                    releaseVideoPlayer();
-                    if (videoSurface != null) {
-                        videoSurface.release();
-                        videoSurface = null;
-                    }
-                    return true;
-                }
-
-                @Override
-                public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
-                }
-            });
-
-            container.addView(videoView, 0, new FrameLayout.LayoutParams(
+        image = new ImageView(context);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
+                ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
+        caption = names.isEmpty() ? null : makeCaption(context, root);
+        if (config.wallpaperEnabled && !files.isEmpty()) {
+            root.addView(image, 0, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            root.addView(container, 0, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            root.setBackground(null);
-            names = Collections.emptyMap();
-            caption = null;
-        } else {
-            names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
-                    ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
-            caption = names.isEmpty() ? null : makeCaption(context, root);
-            if (config.wallpaperEnabled && !files.isEmpty()) {
-                root.addView(container, 0, new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-                showFirst();
-            }
+            showFirst();
         }
     }
 
@@ -207,11 +115,10 @@ final class WallpaperPlayer {
                 // The picture covers the whole screen: the root's plain colour under it is overdraw.
                 root.setBackground(null);
                 displayed = first.getName();
-                lastChangeTime = System.currentTimeMillis();
                 showCaption(false);
                 if (!displayed.equals(previous)) {
                     preferences.edit().putString("image", displayed)
-                            .putLong("changed", lastChangeTime).apply();
+                            .putLong("changed", System.currentTimeMillis()).apply();
                 }
                 return;
             }
@@ -223,49 +130,17 @@ final class WallpaperPlayer {
 
     void start() {
         active = true;
-        if (videoFile != null) {
-            if (videoSurfaceReady) {
-                startVideoPlayer();
-            }
-            return;
-        }
-        handler.removeCallbacks(rotationTask);
         update();
-        if (interval > 0 && interval < 60_000L) {
-            handler.postDelayed(rotationTask, interval);
-        }
     }
 
     void stop() {
         active = false;
-        if (videoFile != null) {
-            if (videoPlayer != null) {
-                try {
-                    if (videoPlayer.isPlaying()) {
-                        videoPlayer.pause();
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-            return;
-        }
-        handler.removeCallbacks(rotationTask);
-        if (!TextUtils.isEmpty(displayed)) {
-            preferences.edit().putString("image", displayed)
-                    .putLong("changed", lastChangeTime).apply();
-        }
     }
 
     /** Drops the wallpaper texture when Home is hidden and Android asks the process to free memory. */
     void releaseForMemoryPressure() {
-        if (videoFile != null) {
-            releaseVideoPlayer();
-            root.setBackgroundColor(backgroundColor);
-            return;
-        }
         if (current == null) return;
-        imageA.setImageDrawable(null);
-        imageB.setImageDrawable(null);
+        image.setImageDrawable(null);
         // The renderer may still have a queued frame that references this hardware bitmap. Drop our references and
         // let Android reclaim its native buffer after rendering releases it instead of recycling it mid-frame.
         current = null;
@@ -287,28 +162,18 @@ final class WallpaperPlayer {
     void close() {
         active = false;
         closed = true;
-        if (videoFile != null) {
-            releaseVideoPlayer();
-            if (videoSurface != null) {
-                videoSurface.release();
-                videoSurface = null;
-            }
-            return;
-        }
-        handler.removeCallbacks(rotationTask);
         decoder.shutdownNow();
     }
 
     void update() {
-        if (videoFile != null) return;
         if (!active || closed || loading || files.isEmpty()) return;
-        String currentImage = !TextUtils.isEmpty(displayed) ? displayed : preferences.getString("image", "");
+        String previous = preferences.getString("image", "");
         // A picture outside the time of day's group (the group changed) is replaced at once, not after the interval.
         List<File> playable = playable();
-        File selected = WallpaperRotation.find(playable, currentImage);
-        long changed = lastChangeTime > 0 ? lastChangeTime : preferences.getLong("changed", 0);
+        File selected = WallpaperRotation.find(playable, previous);
+        long changed = preferences.getLong("changed", 0);
         if (selected == null || WallpaperRotation.due(changed, System.currentTimeMillis(), interval)) {
-            selected = WallpaperRotation.pick(playable, currentImage, order, random);
+            selected = WallpaperRotation.pick(playable, previous, order, random);
         }
         if (selected == null || selected.getName().equals(displayed)) return;
         File next = selected;
@@ -330,12 +195,9 @@ final class WallpaperPlayer {
                 show(bitmap);
                 displayed = next.getName();
                 showCaption(true);
-                lastChangeTime = System.currentTimeMillis();
-                if (interval >= 60_000L) {
-                    if (!displayed.equals(currentImage) || changed == 0) {
-                        preferences.edit().putString("image", displayed)
-                                .putLong("changed", lastChangeTime).apply();
-                    }
+                if (!displayed.equals(previous) || changed == 0) {
+                    preferences.edit().putString("image", displayed)
+                            .putLong("changed", System.currentTimeMillis()).apply();
                 }
             });
         });
@@ -384,9 +246,9 @@ final class WallpaperPlayer {
             caption.setAlpha(1f);
             return;
         }
-        caption.animate().alpha(0f).setDuration(600).withEndAction(() -> {
+        caption.animate().alpha(0f).setDuration(250).withEndAction(() -> {
             caption.setText(name);
-            caption.animate().alpha(1f).setDuration(1000).start();
+            caption.animate().alpha(1f).setDuration(350).start();
         }).start();
     }
 
@@ -397,37 +259,14 @@ final class WallpaperPlayer {
         return key.toString();
     }
 
-    /** Puts a picture on screen with smooth crossfade and releases the previous one after transition. */
+    /** Puts a picture on screen and releases the previous one after a frame has drawn the new one. */
     private void show(Bitmap bitmap) {
-        root.setBackground(null);
-        if (current == null) {
-            current = bitmap;
-            imageA.setImageBitmap(bitmap);
-            imageA.setAlpha(1f);
-            imageB.setImageDrawable(null);
-            imageB.setAlpha(0f);
-            showingA = true;
-            return;
-        }
-        ImageView incoming = showingA ? imageB : imageA;
-        ImageView outgoing = showingA ? imageA : imageB;
-        showingA = !showingA;
-
         Bitmap old = current;
         current = bitmap;
-
-        incoming.setImageBitmap(bitmap);
-        incoming.bringToFront();
-        incoming.setAlpha(0f);
-        incoming.animate().alpha(1f).setDuration(2000)
-                .setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator()).start();
-        outgoing.animate().alpha(0f).setDuration(2000)
-                .setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator()).withEndAction(() -> {
-            outgoing.setImageDrawable(null);
-            if (old != null && old != bitmap && !old.isRecycled()) {
-                old.recycle();
-            }
-        }).start();
+        // The wallpaper covers the whole root; avoid drawing the fallback colour under it.
+        root.setBackground(null);
+        image.setImageBitmap(bitmap);
+        if (old != null && old != bitmap) image.postDelayed(old::recycle, 500);
     }
 
     private Bitmap decode(File file) {
@@ -462,110 +301,4 @@ final class WallpaperPlayer {
             return null;
         }
     }
-
-    private void startVideoPlayer() {
-        if (videoFile == null || !videoSurfaceReady || videoSurface == null || closed) return;
-        try {
-            if (videoPlayer == null) {
-                videoPlayer = new MediaPlayer();
-                videoPlayer.setSurface(videoSurface);
-                videoPlayer.setDataSource(videoFile.getAbsolutePath());
-                videoPlayer.setLooping(true);
-                videoPlayer.setVolume(0f, 0f);
-                videoPlayer.setOnPreparedListener(mp -> {
-                    if (active && !closed) {
-                        mp.start();
-                        applyVideoScale();
-                    }
-                });
-                videoPlayer.setOnVideoSizeChangedListener((mp, w, h) -> applyVideoScale());
-                videoPlayer.setOnErrorListener((mp, what, extra) -> {
-                    Log.e("TvHome.Wallpaper", "Video wallpaper error: what=" + what + ", extra=" + extra);
-                    releaseVideoPlayer();
-                    return true;
-                });
-                videoPlayer.prepareAsync();
-            } else {
-                if (!videoPlayer.isPlaying()) {
-                    videoPlayer.start();
-                }
-            }
-        } catch (Exception e) {
-            Log.e("TvHome.Wallpaper", "Failed to start video wallpaper", e);
-            releaseVideoPlayer();
-        }
-    }
-
-    private void releaseVideoPlayer() {
-        if (videoPlayer != null) {
-            try {
-                if (videoPlayer.isPlaying()) {
-                    videoPlayer.stop();
-                }
-            } catch (Exception ignored) {
-            }
-            try {
-                videoPlayer.reset();
-                videoPlayer.release();
-            } catch (Exception ignored) {
-            }
-            videoPlayer = null;
-        }
-    }
-
-    private void applyVideoScale() {
-        if (videoView == null || videoPlayer == null) return;
-        try {
-            int videoW = videoPlayer.getVideoWidth();
-            int videoH = videoPlayer.getVideoHeight();
-            int viewW = videoView.getWidth();
-            int viewH = videoView.getHeight();
-            if (videoW <= 0 || videoH <= 0 || viewW <= 0 || viewH <= 0) return;
-
-            float sx = 1.0f;
-            float sy = 1.0f;
-            float videoAspect = (float) videoW / (float) videoH;
-            float viewAspect = (float) viewW / (float) viewH;
-
-            if (videoAspect > viewAspect) {
-                sx = videoAspect / viewAspect;
-            } else {
-                sy = viewAspect / videoAspect;
-            }
-
-            Matrix matrix = new Matrix();
-            matrix.setScale(sx, sy, viewW / 2.0f, viewH / 2.0f);
-            videoView.setTransform(matrix);
-        } catch (Exception ignored) {
-        }
-    }
-
-    private static File findVideoWallpaper(Context context) {
-        String[] names = new String[] {
-                "wallpaper.mp4",
-                "wallpaper.webm",
-                "11929613_1920_1080_60fps.mp4",
-                "animated_wallpaper.mp4"
-        };
-        List<File> dirs = new ArrayList<>();
-        File ext = context.getExternalFilesDir(null);
-        if (ext != null) dirs.add(ext);
-        File intDir = context.getFilesDir();
-        if (intDir != null) dirs.add(intDir);
-        dirs.add(new File("/sdcard/Android/data/com.gathin.tvhome/files"));
-        dirs.add(new File("/storage/emulated/0/Android/data/com.gathin.tvhome/files"));
-        dirs.add(new File("/sdcard"));
-
-        for (File dir : dirs) {
-            for (String name : names) {
-                File candidate = new File(dir, name);
-                if (candidate.exists() && candidate.isFile() && candidate.length() > 0) {
-                    Log.i("TvHome.Wallpaper", "Found video wallpaper: " + candidate.getAbsolutePath());
-                    return candidate;
-                }
-            }
-        }
-        return null;
-    }
 }
-
