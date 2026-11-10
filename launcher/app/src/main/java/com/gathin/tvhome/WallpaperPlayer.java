@@ -5,6 +5,9 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Matrix;
+import android.graphics.SurfaceTexture;
+import android.media.MediaPlayer;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
@@ -12,6 +15,8 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.Surface;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -69,6 +74,11 @@ final class WallpaperPlayer {
             }
         }
     };
+    private final File videoFile;
+    private TextureView videoView;
+    private Surface videoSurface;
+    private MediaPlayer videoPlayer;
+    private boolean videoSurfaceReady;
     /** wallpaper_captions: the shown picture's name from wallpapers/captions.txt; null when off or there are none. */
     private final TextView caption;
     private final Map<String, String> names;
@@ -122,13 +132,61 @@ final class WallpaperPlayer {
         container.addView(imageA, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
-                ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
-        caption = names.isEmpty() ? null : makeCaption(context, root);
-        if (config.wallpaperEnabled && !files.isEmpty()) {
+        videoFile = findVideoWallpaper(context);
+        if (videoFile != null) {
+            imageA.setVisibility(View.GONE);
+            imageB.setVisibility(View.GONE);
+            videoView = new TextureView(context);
+            videoView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                @Override
+                public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int w, int h) {
+                    if (videoSurface != null) {
+                        videoSurface.release();
+                    }
+                    videoSurface = new Surface(surfaceTexture);
+                    videoSurfaceReady = true;
+                    if (active && !closed) {
+                        startVideoPlayer();
+                    }
+                }
+
+                @Override
+                public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int w, int h) {
+                    applyVideoScale();
+                }
+
+                @Override
+                public boolean onSurfaceTextureDestroyed(SurfaceTexture surfaceTexture) {
+                    videoSurfaceReady = false;
+                    releaseVideoPlayer();
+                    if (videoSurface != null) {
+                        videoSurface.release();
+                        videoSurface = null;
+                    }
+                    return true;
+                }
+
+                @Override
+                public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
+                }
+            });
+
+            container.addView(videoView, 0, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             root.addView(container, 0, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            showFirst();
+            root.setBackground(null);
+            names = Collections.emptyMap();
+            caption = null;
+        } else {
+            names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
+                    ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
+            caption = names.isEmpty() ? null : makeCaption(context, root);
+            if (config.wallpaperEnabled && !files.isEmpty()) {
+                root.addView(container, 0, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                showFirst();
+            }
         }
     }
 
@@ -165,6 +223,12 @@ final class WallpaperPlayer {
 
     void start() {
         active = true;
+        if (videoFile != null) {
+            if (videoSurfaceReady) {
+                startVideoPlayer();
+            }
+            return;
+        }
         handler.removeCallbacks(rotationTask);
         update();
         if (interval > 0 && interval < 60_000L) {
@@ -174,6 +238,17 @@ final class WallpaperPlayer {
 
     void stop() {
         active = false;
+        if (videoFile != null) {
+            if (videoPlayer != null) {
+                try {
+                    if (videoPlayer.isPlaying()) {
+                        videoPlayer.pause();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            return;
+        }
         handler.removeCallbacks(rotationTask);
         if (!TextUtils.isEmpty(displayed)) {
             preferences.edit().putString("image", displayed)
@@ -183,6 +258,11 @@ final class WallpaperPlayer {
 
     /** Drops the wallpaper texture when Home is hidden and Android asks the process to free memory. */
     void releaseForMemoryPressure() {
+        if (videoFile != null) {
+            releaseVideoPlayer();
+            root.setBackgroundColor(backgroundColor);
+            return;
+        }
         if (current == null) return;
         imageA.setImageDrawable(null);
         imageB.setImageDrawable(null);
@@ -207,11 +287,20 @@ final class WallpaperPlayer {
     void close() {
         active = false;
         closed = true;
+        if (videoFile != null) {
+            releaseVideoPlayer();
+            if (videoSurface != null) {
+                videoSurface.release();
+                videoSurface = null;
+            }
+            return;
+        }
         handler.removeCallbacks(rotationTask);
         decoder.shutdownNow();
     }
 
     void update() {
+        if (videoFile != null) return;
         if (!active || closed || loading || files.isEmpty()) return;
         String currentImage = !TextUtils.isEmpty(displayed) ? displayed : preferences.getString("image", "");
         // A picture outside the time of day's group (the group changed) is replaced at once, not after the interval.
@@ -372,6 +461,111 @@ final class WallpaperPlayer {
         } catch (Exception | OutOfMemoryError failure) {
             return null;
         }
+    }
+
+    private void startVideoPlayer() {
+        if (videoFile == null || !videoSurfaceReady || videoSurface == null || closed) return;
+        try {
+            if (videoPlayer == null) {
+                videoPlayer = new MediaPlayer();
+                videoPlayer.setSurface(videoSurface);
+                videoPlayer.setDataSource(videoFile.getAbsolutePath());
+                videoPlayer.setLooping(true);
+                videoPlayer.setVolume(0f, 0f);
+                videoPlayer.setOnPreparedListener(mp -> {
+                    if (active && !closed) {
+                        mp.start();
+                        applyVideoScale();
+                    }
+                });
+                videoPlayer.setOnVideoSizeChangedListener((mp, w, h) -> applyVideoScale());
+                videoPlayer.setOnErrorListener((mp, what, extra) -> {
+                    Log.e("TvHome.Wallpaper", "Video wallpaper error: what=" + what + ", extra=" + extra);
+                    releaseVideoPlayer();
+                    return true;
+                });
+                videoPlayer.prepareAsync();
+            } else {
+                if (!videoPlayer.isPlaying()) {
+                    videoPlayer.start();
+                }
+            }
+        } catch (Exception e) {
+            Log.e("TvHome.Wallpaper", "Failed to start video wallpaper", e);
+            releaseVideoPlayer();
+        }
+    }
+
+    private void releaseVideoPlayer() {
+        if (videoPlayer != null) {
+            try {
+                if (videoPlayer.isPlaying()) {
+                    videoPlayer.stop();
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                videoPlayer.reset();
+                videoPlayer.release();
+            } catch (Exception ignored) {
+            }
+            videoPlayer = null;
+        }
+    }
+
+    private void applyVideoScale() {
+        if (videoView == null || videoPlayer == null) return;
+        try {
+            int videoW = videoPlayer.getVideoWidth();
+            int videoH = videoPlayer.getVideoHeight();
+            int viewW = videoView.getWidth();
+            int viewH = videoView.getHeight();
+            if (videoW <= 0 || videoH <= 0 || viewW <= 0 || viewH <= 0) return;
+
+            float sx = 1.0f;
+            float sy = 1.0f;
+            float videoAspect = (float) videoW / (float) videoH;
+            float viewAspect = (float) viewW / (float) viewH;
+
+            if (videoAspect > viewAspect) {
+                sx = videoAspect / viewAspect;
+            } else {
+                sy = viewAspect / videoAspect;
+            }
+
+            Matrix matrix = new Matrix();
+            matrix.setScale(sx, sy, viewW / 2.0f, viewH / 2.0f);
+            videoView.setTransform(matrix);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static File findVideoWallpaper(Context context) {
+        String[] names = new String[] {
+                "wallpaper.mp4",
+                "wallpaper.webm",
+                "11929613_1920_1080_60fps.mp4",
+                "animated_wallpaper.mp4"
+        };
+        List<File> dirs = new ArrayList<>();
+        File ext = context.getExternalFilesDir(null);
+        if (ext != null) dirs.add(ext);
+        File intDir = context.getFilesDir();
+        if (intDir != null) dirs.add(intDir);
+        dirs.add(new File("/sdcard/Android/data/com.gathin.tvhome/files"));
+        dirs.add(new File("/storage/emulated/0/Android/data/com.gathin.tvhome/files"));
+        dirs.add(new File("/sdcard"));
+
+        for (File dir : dirs) {
+            for (String name : names) {
+                File candidate = new File(dir, name);
+                if (candidate.exists() && candidate.isFile() && candidate.length() > 0) {
+                    Log.i("TvHome.Wallpaper", "Found video wallpaper: " + candidate.getAbsolutePath());
+                    return candidate;
+                }
+            }
+        }
+        return null;
     }
 }
 
